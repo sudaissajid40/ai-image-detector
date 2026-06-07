@@ -269,31 +269,98 @@ async function detectAI(file) {
 }
 
 async function queryHuggingFaceDirectly(buffer) {
-    const API_URL = 'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector';
-    const response = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${state.hfToken}`,
-            "Content-Type": "application/octet-stream"
-        },
-        body: buffer
+    const models = [
+        'umm-maybe/AI-image-detector',
+        'Organika/sdxl-detector'
+    ];
+
+    const promises = models.map(async (modelId) => {
+        try {
+            const res = await fetch(`https://api-inference.huggingface.co/models/${modelId}`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${state.hfToken}`,
+                    "Content-Type": "application/octet-stream"
+                },
+                body: buffer
+            });
+
+            if (res.status === 503) {
+                const text = await res.text();
+                let est = 20;
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed.estimated_time) est = Math.ceil(parsed.estimated_time);
+                } catch (_) {}
+                return { status: 503, wait: est };
+            }
+
+            if (!res.ok) {
+                return { status: res.status, error: `Failed to load model ${modelId}` };
+            }
+
+            const data = await res.json();
+            return { status: 200, data };
+        } catch (err) {
+            return { status: 500, error: err.message };
+        }
     });
 
-    if (response.status === 503) {
-        throw new Error('Model is loading on Hugging Face. Please wait 20 seconds and try again.');
+    const results = await Promise.all(promises);
+
+    const m1 = results[0];
+    const m2 = results[1];
+
+    if (m1.status === 503 || m2.status === 503) {
+        const wait = Math.max(m1.wait || 0, m2.wait || 0);
+        throw new Error(`AI models are starting up on Hugging Face. Please try again in ${wait} seconds.`);
     }
 
-    if (response.status === 401 || response.status === 403) {
-        throw new Error('Invalid Hugging Face token. Please update it in Settings.');
+    let m1Data = m1.status === 200 ? m1.data : null;
+    let m2Data = m2.status === 200 ? m2.data : null;
+
+    if (!m1Data && !m2Data) {
+        throw new Error(`AI Inference failed on local connection. M1: ${m1.error || 'Err'}, M2: ${m2.error || 'Err'}`);
     }
 
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Hugging Face API error (${response.status}): ${text}`);
+    let m1Score = 0.5;
+    if (m1Data && Array.isArray(m1Data)) {
+        const fake = m1Data.find(item => item.label.toLowerCase().includes('artificial') || item.label.toLowerCase().includes('fake'));
+        if (fake) m1Score = fake.score;
+        else {
+            const real = m1Data.find(item => item.label.toLowerCase().includes('human') || item.label.toLowerCase().includes('real'));
+            if (real) m1Score = 1 - real.score;
+        }
     }
 
-    return await response.json();
+    let m2Score = 0.5;
+    if (m2Data && Array.isArray(m2Data)) {
+        const fake = m2Data.find(item => 
+            item.label.toLowerCase().includes('artificial') || 
+            item.label.toLowerCase().includes('fake') || 
+            item.label.toLowerCase().includes('sdxl') ||
+            item.label.toLowerCase().includes('generated')
+        );
+        if (fake) m2Score = fake.score;
+        else {
+            const real = m2Data.find(item => item.label.toLowerCase().includes('human') || item.label.toLowerCase().includes('real'));
+            if (real) m2Score = 1 - real.score;
+        }
+    }
+
+    let finalScore = 0.5;
+    if (m1Data && m2Data) {
+        finalScore = (m1Score + m2Score) / 2;
+    } else {
+        finalScore = m1Data ? m1Score : m2Score;
+    }
+
+    return [
+        { label: 'artificial', score: finalScore },
+        { label: 'human', score: 1 - finalScore }
+    ];
 }
+
 
 async function extractMetadata(file) {
     try {
