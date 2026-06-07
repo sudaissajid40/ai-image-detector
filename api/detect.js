@@ -1,116 +1,102 @@
-// Use Edge Runtime — runs on Cloudflare's global network, much better connectivity
+// Standard Node.js runtime (more compatible than Edge for external API calls)
 export const config = {
-  runtime: 'edge',
+  maxDuration: 30,
 };
 
-export default async function handler(req) {
-  // Handle CORS preflight
+export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-hf-token');
+
   if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, x-hf-token',
-      },
-    });
+    return res.status(200).end();
   }
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-    });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const buffer = await req.arrayBuffer();
+    // Read raw body
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
 
-    // Get token: prefer header sent by browser, then fall back to server env var
-    const headerToken = req.headers.get('x-hf-token') || '';
-    const envToken = process.env.HF_TOKEN || '';
-    const hfToken = headerToken || envToken;
+    // Get token from header or env var
+    const hfToken = req.headers['x-hf-token'] || process.env.HF_TOKEN || '';
 
     if (!hfToken) {
-      return new Response(
-        JSON.stringify({ error: 'No Hugging Face token configured. Please open Settings (gear icon) and enter your HF_TOKEN.' }),
-        {
-          status: 401,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-        }
-      );
+      return res.status(401).json({
+        error: 'No Hugging Face token configured. Open Settings (⚙️) and enter your HF token.',
+      });
     }
 
-    const API_URL = 'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector';
-
+    // Try the model with a 25-second timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 28000);
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
 
-    let response;
+    let hfRes;
     try {
-      response = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${hfToken}`,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: buffer,
-        signal: controller.signal,
-      });
+      hfRes = await fetch(
+        'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hfToken}`,
+            'Content-Type': 'application/octet-stream',
+          },
+          body: buffer,
+          signal: controller.signal,
+        }
+      );
     } catch (fetchErr) {
       clearTimeout(timeoutId);
-      return new Response(
-        JSON.stringify({ error: `Network error contacting Hugging Face: ${fetchErr.message}` }),
-        { status: 502, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
-      );
+      return res.status(502).json({
+        error: `Could not reach Hugging Face API: ${fetchErr.message}`,
+      });
     }
 
     clearTimeout(timeoutId);
 
-    if (response.status === 401 || response.status === 403) {
-      return new Response(
-        JSON.stringify({ error: 'Invalid or expired Hugging Face token. Please update your token in Settings.' }),
-        { status: 401, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
-      );
+    const bodyText = await hfRes.text();
+
+    if (hfRes.status === 401 || hfRes.status === 403) {
+      return res.status(401).json({
+        error: 'Invalid or expired Hugging Face token. Please update it in Settings (⚙️).',
+      });
     }
 
-    if (response.status === 503) {
-      const body = await response.text();
-      let waitTime = 20;
+    if (hfRes.status === 503) {
+      let waitSecs = 20;
       try {
-        const parsed = JSON.parse(body);
-        if (parsed.estimated_time) waitTime = Math.ceil(parsed.estimated_time);
-      } catch (e) { /* ignore */ }
-      return new Response(
-        JSON.stringify({ error: `Model is loading on Hugging Face. Please wait ${waitTime} seconds and try again.` }),
-        { status: 503, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
-      );
+        const parsed = JSON.parse(bodyText);
+        if (parsed.estimated_time) waitSecs = Math.ceil(parsed.estimated_time);
+      } catch (_) {}
+      return res.status(503).json({
+        error: `Model is loading. Please wait ${waitSecs} seconds and try again.`,
+      });
     }
 
-    if (!response.ok) {
-      const body = await response.text();
-      return new Response(
-        JSON.stringify({ error: `Hugging Face API error (${response.status}): ${body}` }),
-        { status: 502, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
-      );
+    if (!hfRes.ok) {
+      return res.status(502).json({
+        error: `Hugging Face returned ${hfRes.status}: ${bodyText.slice(0, 200)}`,
+      });
     }
 
-    const data = await response.json();
-    return new Response(JSON.stringify(data), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
+    let data;
+    try {
+      data = JSON.parse(bodyText);
+    } catch (_) {
+      return res.status(502).json({ error: `Invalid JSON from Hugging Face: ${bodyText.slice(0, 200)}` });
+    }
 
-  } catch (error) {
-    return new Response(
-      JSON.stringify({ error: error.message || 'Internal Server Error' }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-      }
-    );
+    return res.status(200).json(data);
+
+  } catch (err) {
+    console.error('[detect] Unhandled error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 }
