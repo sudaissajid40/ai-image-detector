@@ -10,6 +10,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- exifr library for metadata analysis -->
     <script src="https://cdn.jsdelivr.net/npm/exifr/dist/lite.umd.js"></script>
+    <!-- Supabase JS Client for Auth -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -18,10 +20,25 @@
         <div class="glow glow-2"></div>
     </div>
 
+    <!-- Navigation / Header Bar -->
+    <div class="nav-bar">
+        <div class="user-status-container" id="userStatusContainer">
+            <!-- Loaded via JS -->
+            <button id="authBtn" class="btn primary">Login / Sign Up</button>
+        </div>
+    </div>
+
     <main class="container">
         <header>
             <h1>AI Image Detector</h1>
             <p>Analyze images for AI generation artifacts and metadata health.</p>
+            
+            <!-- Remaining Usage Limits Bar -->
+            <div id="usageLimitBanner" class="usage-banner" style="display: none;">
+                Scans today: <span id="dailyLimitVal" class="limit-badge">0/10</span> | 
+                Scans this month: <span id="monthlyLimitVal" class="limit-badge">0/100</span>
+                <span id="adminBadge" class="admin-badge" style="display: none;">Admin</span>
+            </div>
         </header>
 
 
@@ -102,22 +119,94 @@
                         <!-- Populated by JS -->
                     </ul>
                 </div>
+            </div>
+        </section>
 
-                <!-- Gemini Expert Analysis -->
-                <div class="card gemini-card" id="geminiCard" style="display: none;">
-                    <h3>Gemini AI Analysis</h3>
-                    <div class="gemini-score-display" style="margin-bottom: 10px; font-weight: 600;">
-                        <span>Gemini Verdict: </span><span id="geminiScoreVal">0% AI Probability</span>
-                    </div>
-                    <ul class="gemini-bullets" id="geminiBullets" style="margin-top: 10px; padding-left: 20px; line-height: 1.5; font-size: 0.95rem;">
-                        <!-- Populated by JS -->
-                    </ul>
+        <!-- Admin Dashboard Section -->
+        <section id="adminSection" class="admin-section">
+            <div class="card admin-card">
+                <div class="admin-header">
+                    <h2>Admin Settings & User Limits</h2>
+                    <p>Modify daily & monthly scan limits for users.</p>
+                </div>
+                <div class="admin-table-container">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Daily Limit</th>
+                                <th>Monthly Limit</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="adminUserList">
+                            <!-- Populated dynamically -->
+                            <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Loading user directory...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </section>
     </main>
 
+    <!-- Authentication Modal -->
+    <div id="authModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="authModalTitle">Sign In</h2>
+                <button class="close-btn" id="closeAuthModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="authForm">
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label for="authEmail">Email Address</label>
+                        <input type="email" id="authEmail" required placeholder="you@example.com">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label for="authPassword">Password</label>
+                        <input type="password" id="authPassword" required placeholder="••••••••">
+                    </div>
+                    <p id="authErrorMsg" class="error-msg" style="display:none; color: var(--danger); font-size: 0.9rem; margin-top: 0.5rem;"></p>
+                    <button type="submit" id="authSubmitBtn" class="btn primary" style="width: 100%; margin-top: 1rem;">Sign In</button>
+                </form>
+            </div>
+            <div class="modal-footer" style="justify-content: center;">
+                <p class="hint">Don't have an account? <span id="toggleAuthMode" style="color: var(--primary); cursor: pointer; text-decoration: underline;">Sign Up</span></p>
+            </div>
+        </div>
+    </div>
 
+    <!-- Edit User Limits Modal -->
+    <div id="editLimitModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Modify User Limits</h2>
+                <button class="close-btn" id="closeLimitModal">&times;</button>
+            </div>
+            <form id="editLimitForm">
+                <input type="hidden" id="editUserId">
+                <div class="modal-body">
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label>User Email</label>
+                        <input type="text" id="editUserEmail" readonly style="background: rgba(255,255,255,0.05); color: var(--text-muted);">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label for="editDailyLimit">Daily Limit</label>
+                        <input type="number" id="editDailyLimit" required min="0">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label for="editMonthlyLimit">Monthly Limit</label>
+                        <input type="number" id="editMonthlyLimit" required min="0">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn secondary" id="cancelLimitBtn">Cancel</button>
+                    <button type="submit" class="btn primary">Save Limits</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

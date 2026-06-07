@@ -1,14 +1,44 @@
+// Initialize Supabase Client
+// Note: We use window.location to determine keys, using placeholders if not defined.
+// The user will set these environment variables in their Vercel dashboard.
+const SUPABASE_URL = "https://your-supabase-project.supabase.co"; // Will be overridden dynamically if config is provided
+const SUPABASE_ANON_KEY = "your-anon-key";
+
+// We read them dynamically from a global config object if injected, or fallback
+const supabaseUrl = window.SUPABASE_URL || SUPABASE_URL;
+const supabaseKey = window.SUPABASE_ANON_KEY || SUPABASE_ANON_KEY;
+
+// Create client
+let supabaseClient = null;
+try {
+    if (typeof supabase !== 'undefined') {
+        // If we are locally testing or have keys set
+        const url = localStorage.getItem('sb_url') || supabaseUrl;
+        const key = localStorage.getItem('sb_key') || supabaseKey;
+        if (url && key && url !== 'https://your-supabase-project.supabase.co') {
+            supabaseClient = supabase.createClient(url, key);
+        }
+    }
+} catch (e) {
+    console.error("Failed to initialize Supabase client", e);
+}
+
 // App State
 const state = {
     currentImage: null,
-    isProcessing: false
+    isProcessing: false,
+    session: null,
+    profile: null,
+    usage: null,
+    authMode: 'login' // 'login' or 'signup'
 };
 
 // DOM Elements
 const sections = {
     uploader: document.getElementById('uploaderSection'),
     analysis: document.getElementById('analysisSection'),
-    results: document.getElementById('resultsSection')
+    results: document.getElementById('resultsSection'),
+    admin: document.getElementById('adminSection')
 };
 
 const dropZone = document.getElementById('dropZone');
@@ -21,14 +51,212 @@ const progressFill = document.querySelector('.progress-fill');
 
 const resetBtn = document.getElementById('resetBtn');
 
+// Auth DOM Elements
+const userStatusContainer = document.getElementById('userStatusContainer');
+const usageLimitBanner = document.getElementById('usageLimitBanner');
+const dailyLimitVal = document.getElementById('dailyLimitVal');
+const monthlyLimitVal = document.getElementById('monthlyLimitVal');
+const adminBadge = document.getElementById('adminBadge');
+
+// Modals
+const authModal = document.getElementById('authModal');
+const closeAuthModal = document.getElementById('closeAuthModal');
+const authForm = document.getElementById('authForm');
+const authEmail = document.getElementById('authEmail');
+const authPassword = document.getElementById('authPassword');
+const authSubmitBtn = document.getElementById('authSubmitBtn');
+const authErrorMsg = document.getElementById('authErrorMsg');
+const toggleAuthMode = document.getElementById('toggleAuthMode');
+const authModalTitle = document.getElementById('authModalTitle');
+
+// Admin Modal
+const editLimitModal = document.getElementById('editLimitModal');
+const closeLimitModal = document.getElementById('closeLimitModal');
+const cancelLimitBtn = document.getElementById('cancelLimitBtn');
+const editLimitForm = document.getElementById('editLimitForm');
+const editUserId = document.getElementById('editUserId');
+const editUserEmail = document.getElementById('editUserEmail');
+const editDailyLimit = document.getElementById('editDailyLimit');
+const editMonthlyLimit = document.getElementById('editMonthlyLimit');
+const adminUserList = document.getElementById('adminUserList');
+
 // Initialize
-function init() {
+async function init() {
     setupEventListeners();
+    
+    // Check if configuration needs to be entered (local testing helper)
+    if (!supabaseClient) {
+        promptForSupabaseConfig();
+    } else {
+        // Monitor session auth state
+        supabaseClient.auth.onAuthStateChange(async (event, session) => {
+            state.session = session;
+            if (session) {
+                await fetchUserData();
+            } else {
+                state.profile = null;
+                state.usage = null;
+                updateAuthUI();
+            }
+        });
+
+        // Get initial session
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        state.session = session;
+        if (session) {
+            await fetchUserData();
+        } else {
+            updateAuthUI();
+        }
+    }
+}
+
+function promptForSupabaseConfig() {
+    // If Supabase client could not initialize (e.g. placeholder keys), check localStorage
+    const savedUrl = localStorage.getItem('sb_url');
+    const savedKey = localStorage.getItem('sb_key');
+    if (!savedUrl || !savedKey) {
+        // Create an alert overlay to prompt user to input their Supabase credentials
+        const configDiv = document.createElement('div');
+        configDiv.style = "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(15, 23, 42, 0.95); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px;";
+        configDiv.innerHTML = `
+            <div class="card" style="max-width: 500px; width: 100%; padding: 2rem; background: var(--bg-card); border: 1px solid var(--primary);">
+                <h3 style="color: var(--primary); margin-bottom: 1rem;">Configure Database & Auth</h3>
+                <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">Please configure your Supabase Credentials. These will be stored locally in your browser for testing.</p>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label>Supabase URL</label>
+                    <input type="text" id="sbUrlInput" placeholder="https://yourproject.supabase.co" style="width:100%; padding:0.75rem; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1.5rem;">
+                    <label>Supabase Anon Key</label>
+                    <input type="password" id="sbKeyInput" placeholder="eyJhbG..." style="width:100%; padding:0.75rem; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:white;">
+                </div>
+                <button id="saveSbConfigBtn" class="btn primary" style="width: 100%;">Save & Initialize</button>
+            </div>
+        `;
+        document.body.appendChild(configDiv);
+        document.getElementById('saveSbConfigBtn').addEventListener('click', () => {
+            const url = document.getElementById('sbUrlInput').value.trim();
+            const key = document.getElementById('sbKeyInput').value.trim();
+            if (url && key) {
+                localStorage.setItem('sb_url', url);
+                localStorage.setItem('sb_key', key);
+                window.location.reload();
+            } else {
+                alert('Please enter both parameters.');
+            }
+        });
+    } else {
+        if (typeof supabase !== 'undefined') {
+            supabaseClient = supabase.createClient(savedUrl, savedKey);
+            init(); // Retry initialization with loaded credentials
+        }
+    }
 }
 
 
 // Event Listeners
 function setupEventListeners() {
+    // Auth Modals
+    const authBtn = document.getElementById('authBtn');
+    if (authBtn) {
+        authBtn.addEventListener('click', () => {
+            if (state.session) {
+                // Logout action
+                supabaseClient.auth.signOut();
+            } else {
+                state.authMode = 'login';
+                authModalTitle.textContent = 'Sign In';
+                authSubmitBtn.textContent = 'Sign In';
+                authErrorMsg.style.display = 'none';
+                authModal.classList.add('show');
+            }
+        });
+    }
+
+    closeAuthModal.addEventListener('click', () => authModal.classList.remove('show'));
+    toggleAuthMode.addEventListener('click', () => {
+        if (state.authMode === 'login') {
+            state.authMode = 'signup';
+            authModalTitle.textContent = 'Create Account';
+            authSubmitBtn.textContent = 'Sign Up';
+            toggleAuthMode.textContent = 'Sign In';
+            toggleAuthMode.parentNode.innerHTML = 'Already have an account? <span id="toggleAuthMode" style="color: var(--primary); cursor: pointer; text-decoration: underline;">Sign In</span>';
+            // re-bind as node was replaced
+            document.getElementById('toggleAuthMode').addEventListener('click', () => toggleAuthMode.click());
+        } else {
+            state.authMode = 'login';
+            authModalTitle.textContent = 'Sign In';
+            authSubmitBtn.textContent = 'Sign In';
+            toggleAuthMode.textContent = 'Sign Up';
+            toggleAuthMode.parentNode.innerHTML = "Don't have an account? <span id="toggleAuthMode" style="color: var(--primary); cursor: pointer; text-decoration: underline;">Sign Up</span>";
+            // re-bind
+            document.getElementById('toggleAuthMode').addEventListener('click', () => toggleAuthMode.click());
+        }
+    });
+
+    authForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        authErrorMsg.style.display = 'none';
+        authSubmitBtn.disabled = true;
+        authSubmitBtn.textContent = state.authMode === 'login' ? 'Signing In...' : 'Signing Up...';
+
+        const email = authEmail.value.trim();
+        const password = authPassword.value;
+
+        try {
+            let res;
+            if (state.authMode === 'login') {
+                res = await supabaseClient.auth.signInWithPassword({ email, password });
+            } else {
+                res = await supabaseClient.auth.signUp({ email, password });
+            }
+
+            if (res.error) throw res.error;
+            
+            authModal.classList.remove('show');
+            authForm.reset();
+        } catch (err) {
+            authErrorMsg.textContent = err.message;
+            authErrorMsg.style.display = 'block';
+        } finally {
+            authSubmitBtn.disabled = false;
+            authSubmitBtn.textContent = state.authMode === 'login' ? 'Sign In' : 'Sign Up';
+        }
+    });
+
+    // Close Limit Modals
+    closeLimitModal.addEventListener('click', () => editLimitModal.classList.remove('show'));
+    cancelLimitBtn.addEventListener('click', () => editLimitModal.classList.remove('show'));
+
+    // Submit limits
+    editLimitForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const targetUserId = editUserId.value;
+        const dailyLimit = editDailyLimit.value;
+        const monthlyLimit = editMonthlyLimit.value;
+
+        try {
+            const response = await fetch('/api/admin', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${state.session.access_token}`
+                },
+                body: JSON.stringify({ targetUserId, dailyLimit, monthlyLimit })
+            });
+
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Failed to update limits');
+
+            alert('Limits updated successfully!');
+            editLimitModal.classList.remove('show');
+            await loadAdminDashboard();
+        } catch (err) {
+            alert('Error updating limits: ' + err.message);
+        }
+    });
+
     // Reset
     resetBtn.addEventListener('click', () => {
         state.currentImage = null;
@@ -117,7 +345,6 @@ async function runAnalysisPipeline(file, base64Data) {
         // 2. AI Inference
         updateProgress('Running AI Inference...', 'Querying Hugging Face Model', 50);
         const aiResults = await detectAI(file);
-        console.log('API Response:', JSON.stringify(aiResults, null, 2));
         
         updateProgress('Finalizing Results...', 'Compiling health score', 90);
         
@@ -178,6 +405,10 @@ async function compressImage(file) {
 
 // API Integration
 async function detectAI(file) {
+    if (!state.session) {
+        throw new Error('Please login to analyze images.');
+    }
+
     const buffer = await compressImage(file);
     const API_URL = "/api/detect";
     
@@ -188,7 +419,8 @@ async function detectAI(file) {
         const response = await fetch(API_URL, {
             method: "POST",
             headers: {
-                "Content-Type": "application/octet-stream"
+                "Content-Type": "application/octet-stream",
+                "Authorization": `Bearer ${state.session.access_token}`
             },
             body: buffer,
             signal: controller.signal
@@ -202,6 +434,9 @@ async function detectAI(file) {
             throw new Error(data.error || `Server returned ${response.status}`);
         }
 
+        // Refresh user scan stats dynamically after a successful scan
+        await fetchUserData();
+
         return data;
 
     } catch (error) {
@@ -211,6 +446,133 @@ async function detectAI(file) {
             throw new Error('Request timed out. The AI model may still be loading. Please try again in 20 seconds.');
         }
         throw error;
+    }
+}
+
+// User Profile & Limits Logic
+async function fetchUserData() {
+    if (!state.session) return;
+
+    try {
+        const response = await fetch('/api/user', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${state.session.access_token}`
+            }
+        });
+
+        if (!response.ok) throw new Error('Failed to retrieve user status');
+        const data = await response.json();
+
+        state.profile = data.profile;
+        state.usage = data.usage;
+
+        updateAuthUI();
+
+        // If user is Admin, render the Admin Panel
+        if (state.profile.role === 'admin') {
+            sections.admin.style.display = 'block';
+            await loadAdminDashboard();
+        } else {
+            sections.admin.style.display = 'none';
+        }
+
+    } catch (err) {
+        console.error('Error loading user data:', err);
+    }
+}
+
+function updateAuthUI() {
+    if (state.session) {
+        userStatusContainer.innerHTML = `
+            <span class="user-email">${state.session.user.email}</span>
+            <button id="authBtn" class="logout-btn">Log Out</button>
+        `;
+        document.getElementById('authBtn').addEventListener('click', () => {
+            supabaseClient.auth.signOut();
+        });
+
+        // Update Limits Badges
+        if (state.profile && state.usage) {
+            dailyLimitVal.textContent = `${state.usage.daily}/${state.profile.daily_limit}`;
+            monthlyLimitVal.textContent = `${state.usage.monthly}/${state.profile.monthly_limit}`;
+            usageLimitBanner.style.display = 'inline-flex';
+
+            if (state.profile.role === 'admin') {
+                adminBadge.style.display = 'inline-block';
+            } else {
+                adminBadge.style.display = 'none';
+            }
+        }
+    } else {
+        userStatusContainer.innerHTML = `
+            <button id="authBtn" class="btn primary">Login / Sign Up</button>
+        `;
+        document.getElementById('authBtn').addEventListener('click', () => {
+            state.authMode = 'login';
+            authModalTitle.textContent = 'Sign In';
+            authSubmitBtn.textContent = 'Sign In';
+            authErrorMsg.style.display = 'none';
+            authModal.classList.add('show');
+        });
+        usageLimitBanner.style.display = 'none';
+        sections.admin.style.display = 'none';
+    }
+}
+
+// Admin Panel Logic
+async function loadAdminDashboard() {
+    if (!state.session || !state.profile || state.profile.role !== 'admin') return;
+
+    try {
+        const response = await fetch('/api/admin', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${state.session.access_token}`
+            }
+        });
+
+        if (!response.ok) throw new Error('Failed to retrieve user directory');
+        const data = await response.json();
+
+        adminUserList.innerHTML = '';
+        if (data.users && data.users.length > 0) {
+            data.users.forEach(user => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${user.email}</td>
+                    <td><span class="badge">${user.role}</span></td>
+                    <td>${user.daily_limit}</td>
+                    <td>${user.monthly_limit}</td>
+                    <td>
+                        <button class="btn secondary edit-limit-btn" data-id="${user.id}" data-email="${user.email}" data-daily="${user.daily_limit}" data-monthly="${user.monthly_limit}">Edit Limits</button>
+                    </td>
+                `;
+                adminUserList.appendChild(tr);
+            });
+
+            // Bind click to edit buttons
+            document.querySelectorAll('.edit-limit-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const id = e.target.dataset.id;
+                    const email = e.target.dataset.email;
+                    const daily = e.target.dataset.daily;
+                    const monthly = e.target.dataset.monthly;
+
+                    editUserId.value = id;
+                    editUserEmail.value = email;
+                    editDailyLimit.value = daily;
+                    editMonthlyLimit.value = monthly;
+
+                    editLimitModal.classList.add('show');
+                });
+            });
+        } else {
+            adminUserList.innerHTML = '<tr><td colspan="5" style="text-align: center;">No users registered yet.</td></tr>';
+        }
+    } catch (err) {
+        console.error('Error loading admin dashboard:', err);
+        adminUserList.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--danger);">Error: ${err.message}</td></tr>`;
     }
 }
 
@@ -227,12 +589,22 @@ async function extractMetadata(file) {
 }
 
 // Render Results
-function renderResults(apiResponse, metadata) {
-    const isCombined = apiResponse && typeof apiResponse === 'object' && 'combinedScore' in apiResponse;
-    const aiPercentage = isCombined ? apiResponse.combinedScore : 0;
-    const aiResults = isCombined ? apiResponse.hfResults : apiResponse;
-    const geminiData = isCombined ? apiResponse.geminiResults : null;
-    const geminiActive = isCombined ? apiResponse.geminiActive : false;
+function renderResults(aiResults, metadata) {
+    let fakeScore = 0;
+    
+    if (Array.isArray(aiResults)) {
+        const fakeResult = aiResults.find(r => r.label.toLowerCase().includes('artificial') || r.label.toLowerCase().includes('fake'));
+        if (fakeResult) {
+            fakeScore = fakeResult.score;
+        } else {
+            const realResult = aiResults.find(r => r.label.toLowerCase().includes('human') || r.label.toLowerCase().includes('real'));
+            if (realResult) {
+                fakeScore = 1 - realResult.score;
+            }
+        }
+    }
+
+    const aiPercentage = Math.round(fakeScore * 100);
 
     const circle = document.getElementById('scoreCirclePath');
     const scoreValue = document.getElementById('scoreValue');
@@ -274,24 +646,6 @@ function renderResults(apiResponse, metadata) {
                 </div>
             `;
         });
-    }
-
-    // Render Gemini Card
-    const geminiCard = document.getElementById('geminiCard');
-    const geminiScoreVal = document.getElementById('geminiScoreVal');
-    const geminiBullets = document.getElementById('geminiBullets');
-
-    if (geminiActive && geminiData) {
-        geminiCard.style.display = 'block';
-        geminiScoreVal.textContent = `${geminiData.ai_score}% AI Probability`;
-        geminiBullets.innerHTML = '';
-        if (Array.isArray(geminiData.reasoning)) {
-            geminiData.reasoning.forEach(bullet => {
-                geminiBullets.innerHTML += `<li style="margin-bottom: 6px;">${bullet}</li>`;
-            });
-        }
-    } else {
-        geminiCard.style.display = 'none';
     }
 
     const metadataStatus = document.getElementById('metadataStatus');
