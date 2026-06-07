@@ -1,6 +1,6 @@
 // App State
 const state = {
-    hfToken: '', // Enter your Hugging Face token in Settings modal
+    hfToken: '',
     currentImage: null,
     isProcessing: false
 };
@@ -26,17 +26,31 @@ const closeBtn = document.querySelector('.close-btn');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
 const hfTokenInput = document.getElementById('hfToken');
 const resetBtn = document.getElementById('resetBtn');
+const tokenBanner = document.getElementById('tokenBanner');
+const bannerConfigBtn = document.getElementById('bannerConfigBtn');
+const bannerDismissBtn = document.getElementById('bannerDismissBtn');
 
 // Initialize
 function init() {
-    // Load token from localStorage if exists
     const savedToken = localStorage.getItem('hf_token');
     if (savedToken) {
         state.hfToken = savedToken;
     }
     hfTokenInput.value = state.hfToken;
 
+    // Show banner if no token is set
+    updateBanner();
+
     setupEventListeners();
+}
+
+function updateBanner() {
+    if (!tokenBanner) return;
+    if (!state.hfToken) {
+        tokenBanner.style.display = 'flex';
+    } else {
+        tokenBanner.style.display = 'none';
+    }
 }
 
 // Event Listeners
@@ -48,7 +62,12 @@ function setupEventListeners() {
         state.hfToken = hfTokenInput.value.trim();
         localStorage.setItem('hf_token', state.hfToken);
         settingsModal.classList.remove('show');
+        updateBanner();
     });
+
+    // Banner buttons
+    if (bannerConfigBtn) bannerConfigBtn.addEventListener('click', () => settingsModal.classList.add('show'));
+    if (bannerDismissBtn) bannerDismissBtn.addEventListener('click', () => tokenBanner.style.display = 'none');
 
     // Reset
     resetBtn.addEventListener('click', () => {
@@ -62,6 +81,7 @@ function setupEventListeners() {
     
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
         dropZone.addEventListener(eventName, preventDefaults, false);
+        document.body.addEventListener(eventName, preventDefaults, false);
     });
 
     ['dragenter', 'dragover'].forEach(eventName => {
@@ -103,17 +123,14 @@ function showSection(sectionName) {
 // Main Processing Flow
 async function processFile(file) {
     if (!file.type.startsWith('image/')) {
-        alert('Please upload an image file.');
+        alert('Please upload an image file (JPG, PNG, WEBP, etc.).');
         return;
     }
 
-    if (!state.hfToken) {
-        alert('Please configure your Hugging Face API Token in Settings first.');
-        settingsModal.classList.add('show');
-        return;
-    }
+    if (state.isProcessing) return;
 
     state.currentImage = file;
+    state.isProcessing = true;
     
     // Setup preview
     const reader = new FileReader();
@@ -122,6 +139,11 @@ async function processFile(file) {
         showSection('analysis');
         
         await runAnalysisPipeline(file, e.target.result);
+        state.isProcessing = false;
+    };
+    reader.onerror = () => {
+        alert('Failed to read the image file. Please try again.');
+        state.isProcessing = false;
     };
     reader.readAsDataURL(file);
 }
@@ -145,8 +167,8 @@ async function runAnalysisPipeline(file, base64Data) {
 
     } catch (error) {
         console.error(error);
-        alert('An error occurred during analysis: ' + error.message);
         showSection('uploader');
+        alert('Analysis error: ' + error.message);
     }
 }
 
@@ -165,7 +187,7 @@ async function compressImage(file) {
                 const canvas = document.createElement('canvas');
                 let width = img.width;
                 let height = img.height;
-                const MAX_SIZE = 800; // Resize to max 800px to ensure it's small!
+                const MAX_SIZE = 800;
                 
                 if (width > height && width > MAX_SIZE) {
                     height *= MAX_SIZE / width;
@@ -180,7 +202,6 @@ async function compressImage(file) {
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0, width, height);
                 
-                // Compress to JPEG 80% quality
                 canvas.toBlob((blob) => {
                     if (blob) resolve(blob.arrayBuffer());
                     else reject(new Error('Image compression failed'));
@@ -196,68 +217,52 @@ async function compressImage(file) {
 
 // API Integration
 async function detectAI(file) {
-    // We compress the image to ensure it's < 1MB so Vercel doesn't block it!
     const buffer = await compressImage(file);
     
-    // Fallback: If we are running on a local static server or file protocol,
-    // and the user has configured their Hugging Face token in the settings modal,
-    // we call the Hugging Face API directly from the browser.
+    // On local/file protocol: call HF API directly from browser
     const isLocalStatic = window.location.hostname === 'localhost' || 
                           window.location.hostname === '127.0.0.1' || 
                           window.location.protocol === 'file:';
                           
-    if (isLocalStatic && state.hfToken) {
-        console.log("Local environment detected. Querying Hugging Face API directly from the client.");
+    if (isLocalStatic) {
+        if (!state.hfToken) {
+            throw new Error('No token set. Please open Settings (gear icon) and enter your Hugging Face token.');
+        }
         return await queryHuggingFaceDirectly(buffer);
     }
 
+    // On Vercel: use server-side API (token from env var, supplemented by x-hf-token header)
     const API_URL = "/api/detect";
     
-    // Set a 15-second timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     
     try {
         const response = await fetch(API_URL, {
+            method: "POST",
             headers: {
-                "x-hf-token": state.hfToken,
+                "x-hf-token": state.hfToken || '',
                 "Content-Type": "application/octet-stream"
             },
-            method: "POST",
             body: buffer,
             signal: controller.signal
         });
 
         clearTimeout(timeoutId);
 
+        const data = await response.json().catch(() => ({ error: `Server error ${response.status}` }));
+
         if (!response.ok) {
-            let errorMsg = 'Failed to analyze image';
-            try {
-                const err = await response.json();
-                errorMsg = err.error || errorMsg;
-            } catch (e) {
-                errorMsg = `Server returned status ${response.status} (${response.statusText})`;
-            }
-            
-            if (response.status === 503) {
-                throw new Error('Model is currently loading on Hugging Face. Please wait 10-20 seconds and try again.');
-            }
-            throw new Error(errorMsg);
+            throw new Error(data.error || `Server returned ${response.status}`);
         }
 
-        return await response.json(); 
+        return data;
+
     } catch (error) {
         clearTimeout(timeoutId);
-        console.warn("API Error:", error);
         
-        // If it's a network error or a timeout, fallback to a simulation so the UI doesn't break
-        if (error.name === 'AbortError' || error.message === 'Failed to fetch' || error.name === 'TypeError') {
-            alert("Network Error or Timeout: Could not reach the API. Falling back to simulated results so you can see the UI!");
-            // Return a simulated response
-            return [
-                { label: "artificial", score: Math.random() * 0.8 + 0.1 }, 
-                { label: "human", score: Math.random() * 0.5 }
-            ];
+        if (error.name === 'AbortError') {
+            throw new Error('Request timed out. The AI model may still be loading. Please try again in 20 seconds.');
         }
         throw error;
     }
@@ -266,20 +271,25 @@ async function detectAI(file) {
 async function queryHuggingFaceDirectly(buffer) {
     const API_URL = 'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector';
     const response = await fetch(API_URL, {
+        method: "POST",
         headers: {
             "Authorization": `Bearer ${state.hfToken}`,
             "Content-Type": "application/octet-stream"
         },
-        method: "POST",
         body: buffer
     });
 
+    if (response.status === 503) {
+        throw new Error('Model is loading on Hugging Face. Please wait 20 seconds and try again.');
+    }
+
+    if (response.status === 401 || response.status === 403) {
+        throw new Error('Invalid Hugging Face token. Please update it in Settings.');
+    }
+
     if (!response.ok) {
-        if (response.status === 503) {
-            throw new Error('Model is currently loading on Hugging Face. Please wait 10-20 seconds and try again.');
-        }
         const text = await response.text();
-        throw new Error(`Hugging Face API Error (${response.status}): ${text}`);
+        throw new Error(`Hugging Face API error (${response.status}): ${text}`);
     }
 
     return await response.json();
@@ -299,17 +309,13 @@ async function extractMetadata(file) {
 
 // Render Results
 function renderResults(aiResults, metadata) {
-    // 1. Parse AI Results
-    // The model typically returns 'artificial' and 'human'
     let fakeScore = 0;
     
     if (Array.isArray(aiResults)) {
-        // Model might return {label: "artificial", score: ...}
         const fakeResult = aiResults.find(r => r.label.toLowerCase().includes('artificial') || r.label.toLowerCase().includes('fake'));
         if (fakeResult) {
             fakeScore = fakeResult.score;
         } else {
-            // Fallback if labels are different
             const realResult = aiResults.find(r => r.label.toLowerCase().includes('human') || r.label.toLowerCase().includes('real'));
             if (realResult) {
                 fakeScore = 1 - realResult.score;
@@ -317,11 +323,8 @@ function renderResults(aiResults, metadata) {
         }
     }
 
-    // Convert to percentage
     const aiPercentage = Math.round(fakeScore * 100);
-    const isFake = aiPercentage > 50;
 
-    // Render Circle Score
     const circle = document.getElementById('scoreCirclePath');
     const scoreValue = document.getElementById('scoreValue');
     const scoreLabel = document.getElementById('scoreLabel');
@@ -329,7 +332,7 @@ function renderResults(aiResults, metadata) {
     scoreValue.textContent = `${aiPercentage}%`;
     circle.setAttribute('stroke-dasharray', `${aiPercentage}, 100`);
     
-    scoreLabel.className = 'score-label'; // Reset
+    scoreLabel.className = 'score-label';
     if (aiPercentage > 75) {
         circle.style.stroke = 'var(--danger)';
         scoreLabel.textContent = 'Likely AI Generated';
@@ -344,7 +347,6 @@ function renderResults(aiResults, metadata) {
         scoreLabel.classList.add('score-real');
     }
 
-    // Render Breakdown
     const breakdownList = document.getElementById('breakdownList');
     breakdownList.innerHTML = '';
     
@@ -365,7 +367,6 @@ function renderResults(aiResults, metadata) {
         });
     }
 
-    // Render Metadata Health
     const metadataStatus = document.getElementById('metadataStatus');
     const metadataDetails = document.getElementById('metadataDetails');
     
@@ -379,7 +380,6 @@ function renderResults(aiResults, metadata) {
             <p>Camera EXIF Data Found</p>
         `;
         
-        // Show a few key properties
         const keysToShow = ['Make', 'Model', 'Software', 'DateTimeOriginal', 'LensModel'];
         let addedProps = 0;
         
@@ -406,7 +406,7 @@ function renderResults(aiResults, metadata) {
         metadataDetails.innerHTML = `
             <li>EXIF Signature <span>Missing</span></li>
             <li>Camera Data <span>Stripped or absent</span></li>
-            <li style="margin-top: 10px; color: var(--warning); font-size: 0.8rem;">Note: AI generators rarely produce EXIF data, but some social platforms strip it too.</li>
+            <li style="margin-top: 10px; color: var(--warning); font-size: 0.8rem;">Note: AI generators rarely produce EXIF data, but some platforms strip it too.</li>
         `;
     }
 }
