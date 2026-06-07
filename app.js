@@ -226,22 +226,12 @@ async function extractMetadata(file) {
 }
 
 // Render Results
-function renderResults(aiResults, metadata) {
-    let fakeScore = 0;
-    
-    if (Array.isArray(aiResults)) {
-        const fakeResult = aiResults.find(r => r.label.toLowerCase().includes('artificial') || r.label.toLowerCase().includes('fake'));
-        if (fakeResult) {
-            fakeScore = fakeResult.score;
-        } else {
-            const realResult = aiResults.find(r => r.label.toLowerCase().includes('human') || r.label.toLowerCase().includes('real'));
-            if (realResult) {
-                fakeScore = 1 - realResult.score;
-            }
-        }
-    }
-
-    const aiPercentage = Math.round(fakeScore * 100);
+function renderResults(apiResponse, metadata) {
+    const isCombined = apiResponse && typeof apiResponse === 'object' && 'combinedScore' in apiResponse;
+    const aiPercentage = isCombined ? apiResponse.combinedScore : 0;
+    const aiResults = isCombined ? apiResponse.hfResults : apiResponse;
+    const geminiData = isCombined ? apiResponse.geminiResults : null;
+    const geminiActive = isCombined ? apiResponse.geminiActive : false;
 
     const circle = document.getElementById('scoreCirclePath');
     const scoreValue = document.getElementById('scoreValue');
@@ -283,6 +273,24 @@ function renderResults(aiResults, metadata) {
                 </div>
             `;
         });
+    }
+
+    // Render Gemini Card
+    const geminiCard = document.getElementById('geminiCard');
+    const geminiScoreVal = document.getElementById('geminiScoreVal');
+    const geminiBullets = document.getElementById('geminiBullets');
+
+    if (geminiActive && geminiData) {
+        geminiCard.style.display = 'block';
+        geminiScoreVal.textContent = `${geminiData.ai_score}% AI Probability`;
+        geminiBullets.innerHTML = '';
+        if (Array.isArray(geminiData.reasoning)) {
+            geminiData.reasoning.forEach(bullet => {
+                geminiBullets.innerHTML += `<li style="margin-bottom: 6px;">${bullet}</li>`;
+            });
+        }
+    } else {
+        geminiCard.style.display = 'none';
     }
 
     const metadataStatus = document.getElementById('metadataStatus');
