@@ -1,37 +1,43 @@
 import https from 'https';
-import dns from 'dns';
 
 export const config = {
   maxDuration: 30,
 };
 
-// Use Cloudflare DNS (1.1.1.1) to bypass Vercel's broken DNS resolver
-const resolver = new dns.Resolver();
-resolver.setServers(['1.1.1.1:53', '8.8.8.8:53']);
-
-function resolveHostname(hostname) {
-  return new Promise((resolve, reject) => {
-    resolver.resolve4(hostname, (err, addresses) => {
-      if (err) {
-        // Fallback: try system resolver
-        dns.resolve4(hostname, (err2, addrs) => {
-          if (err2) reject(new Error(`DNS failed: ${err.message} / ${err2.message}`));
-          else resolve(addrs[0]);
-        });
-      } else {
-        resolve(addresses[0]);
-      }
+// Resolve hostname using Cloudflare's DNS-over-HTTPS (HTTP request, not UDP port 53)
+// This works from inside Vercel's sandboxed serverless environment
+async function resolveViaDoH(hostname) {
+  const dohUrl = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`;
+  
+  try {
+    const response = await fetch(dohUrl, {
+      headers: { 'Accept': 'application/dns-json' },
     });
-  });
+    const data = await response.json();
+    
+    // Find first A record
+    const aRecord = data.Answer?.find(r => r.type === 1);
+    if (aRecord?.data) return aRecord.data;
+    
+    // Try CNAME chain — resolve the CNAME target
+    const cnameRecord = data.Answer?.find(r => r.type === 5);
+    if (cnameRecord?.data) {
+      return resolveViaDoH(cnameRecord.data.replace(/\.$/, ''));
+    }
+    
+    throw new Error(`No A record found for ${hostname}`);
+  } catch (err) {
+    throw new Error(`DoH resolution failed: ${err.message}`);
+  }
 }
 
-// Query a single Hugging Face model using resolved IP
+// Query a single Hugging Face model
 async function queryModel(modelId, token, buffer) {
   let ip;
   try {
-    ip = await resolveHostname('api-inference.huggingface.co');
+    ip = await resolveViaDoH('api-inference.huggingface.co');
   } catch (dnsErr) {
-    return { status: 500, error: `DNS resolution failed: ${dnsErr.message}` };
+    return { status: 500, error: `DNS (DoH) failed: ${dnsErr.message}` };
   }
 
   return new Promise((resolve) => {
@@ -55,21 +61,15 @@ async function queryModel(modelId, token, buffer) {
       res.on('end', () => {
         if (res.statusCode === 503) {
           let est = 20;
-          try {
-            const parsed = JSON.parse(body);
-            if (parsed.estimated_time) est = Math.ceil(parsed.estimated_time);
-          } catch (_) {}
+          try { const p = JSON.parse(body); if (p.estimated_time) est = Math.ceil(p.estimated_time); } catch (_) {}
           resolve({ status: 503, wait: est });
         } else if (res.statusCode === 401 || res.statusCode === 403) {
           resolve({ status: res.statusCode, error: 'Invalid or expired Hugging Face token.' });
         } else if (res.statusCode !== 200) {
           resolve({ status: res.statusCode, error: body.slice(0, 200) });
         } else {
-          try {
-            resolve({ status: 200, data: JSON.parse(body) });
-          } catch (_) {
-            resolve({ status: 500, error: 'Invalid JSON from model' });
-          }
+          try { resolve({ status: 200, data: JSON.parse(body) }); }
+          catch (_) { resolve({ status: 500, error: 'Invalid JSON from model' }); }
         }
       });
     });
@@ -79,6 +79,18 @@ async function queryModel(modelId, token, buffer) {
     req.write(buffer);
     req.end();
   });
+}
+
+function extractAIScore(data, isSDXL = false) {
+  if (!data || !Array.isArray(data)) return 0.5;
+  const fake = data.find(i =>
+    i.label.toLowerCase().includes('artificial') ||
+    i.label.toLowerCase().includes('fake') ||
+    (isSDXL && (i.label.toLowerCase().includes('sdxl') || i.label.toLowerCase().includes('generated')))
+  );
+  if (fake) return fake.score;
+  const real = data.find(i => i.label.toLowerCase().includes('human') || i.label.toLowerCase().includes('real'));
+  return real ? 1 - real.score : 0.5;
 }
 
 export default async function handler(req, res) {
@@ -97,7 +109,7 @@ export default async function handler(req, res) {
     const hfToken = (req.headers['x-hf-token'] || process.env.HF_TOKEN || '').trim();
     if (!hfToken) {
       return res.status(401).json({
-        error: 'No Hugging Face token configured. Open Settings (⚙️) and enter your HF token.',
+        error: 'No Hugging Face token. Open Settings (⚙️) and enter your HF token.',
       });
     }
 
@@ -109,7 +121,7 @@ export default async function handler(req, res) {
 
     if (m1.status === 503 || m2.status === 503) {
       const wait = Math.max(m1.wait || 0, m2.wait || 0);
-      return res.status(503).json({ error: `Models loading. Wait ${wait}s and try again.` });
+      return res.status(503).json({ error: `Models loading. Wait ${wait}s and retry.` });
     }
 
     const d1 = m1.status === 200 ? m1.data : null;
@@ -117,24 +129,12 @@ export default async function handler(req, res) {
 
     if (!d1 && !d2) {
       return res.status(502).json({
-        error: `AI Inference failed. M1(${m1.status}): ${m1.error || 'err'} | M2(${m2.status}): ${m2.error || 'err'}`,
+        error: `Inference failed. M1(${m1.status}): ${m1.error || '?'} | M2(${m2.status}): ${m2.error || '?'}`,
       });
     }
 
-    const extractAI = (data, isSDXL = false) => {
-      if (!data || !Array.isArray(data)) return 0.5;
-      const fake = data.find(i =>
-        i.label.toLowerCase().includes('artificial') ||
-        i.label.toLowerCase().includes('fake') ||
-        (isSDXL && (i.label.toLowerCase().includes('sdxl') || i.label.toLowerCase().includes('generated')))
-      );
-      if (fake) return fake.score;
-      const real = data.find(i => i.label.toLowerCase().includes('human') || i.label.toLowerCase().includes('real'));
-      return real ? 1 - real.score : 0.5;
-    };
-
-    const s1 = extractAI(d1, false);
-    const s2 = extractAI(d2, true);
+    const s1 = extractAIScore(d1, false);
+    const s2 = extractAIScore(d2, true);
     const final = (d1 && d2) ? (s1 + s2) / 2 : (d1 ? s1 : s2);
 
     return res.status(200).json([
