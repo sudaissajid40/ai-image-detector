@@ -1,6 +1,5 @@
 // App State
 const state = {
-    hfToken: '',
     currentImage: null,
     isProcessing: false
 };
@@ -20,55 +19,16 @@ const loadingText = document.getElementById('loadingText');
 const loadingSubtext = document.getElementById('loadingSubtext');
 const progressFill = document.querySelector('.progress-fill');
 
-const settingsBtn = document.getElementById('settingsBtn');
-const settingsModal = document.getElementById('settingsModal');
-const closeBtn = document.querySelector('.close-btn');
-const saveSettingsBtn = document.getElementById('saveSettingsBtn');
-const hfTokenInput = document.getElementById('hfToken');
 const resetBtn = document.getElementById('resetBtn');
-const tokenBanner = document.getElementById('tokenBanner');
-const bannerConfigBtn = document.getElementById('bannerConfigBtn');
-const bannerDismissBtn = document.getElementById('bannerDismissBtn');
 
 // Initialize
 function init() {
-    const savedToken = localStorage.getItem('hf_token');
-    if (savedToken) {
-        state.hfToken = savedToken;
-    }
-    hfTokenInput.value = state.hfToken;
-
-    // Show banner if no token is set
-    updateBanner();
-
     setupEventListeners();
 }
 
-function updateBanner() {
-    if (!tokenBanner) return;
-    if (!state.hfToken) {
-        tokenBanner.style.display = 'flex';
-    } else {
-        tokenBanner.style.display = 'none';
-    }
-}
 
 // Event Listeners
 function setupEventListeners() {
-    // Modal
-    settingsBtn.addEventListener('click', () => settingsModal.classList.add('show'));
-    closeBtn.addEventListener('click', () => settingsModal.classList.remove('show'));
-    saveSettingsBtn.addEventListener('click', () => {
-        state.hfToken = hfTokenInput.value.trim();
-        localStorage.setItem('hf_token', state.hfToken);
-        settingsModal.classList.remove('show');
-        updateBanner();
-    });
-
-    // Banner buttons
-    if (bannerConfigBtn) bannerConfigBtn.addEventListener('click', () => settingsModal.classList.add('show'));
-    if (bannerDismissBtn) bannerDismissBtn.addEventListener('click', () => tokenBanner.style.display = 'none');
-
     // Reset
     resetBtn.addEventListener('click', () => {
         state.currentImage = null;
@@ -218,20 +178,6 @@ async function compressImage(file) {
 // API Integration
 async function detectAI(file) {
     const buffer = await compressImage(file);
-    
-    // On local/file protocol: call HF API directly from browser
-    const isLocalStatic = window.location.hostname === 'localhost' || 
-                          window.location.hostname === '127.0.0.1' || 
-                          window.location.protocol === 'file:';
-                          
-    if (isLocalStatic) {
-        if (!state.hfToken) {
-            throw new Error('No token set. Please open Settings (gear icon) and enter your Hugging Face token.');
-        }
-        return await queryHuggingFaceDirectly(buffer);
-    }
-
-    // On Vercel: use server-side API (token from env var, supplemented by x-hf-token header)
     const API_URL = "/api/detect";
     
     const controller = new AbortController();
@@ -241,7 +187,6 @@ async function detectAI(file) {
         const response = await fetch(API_URL, {
             method: "POST",
             headers: {
-                "x-hf-token": state.hfToken || '',
                 "Content-Type": "application/octet-stream"
             },
             body: buffer,
@@ -266,33 +211,6 @@ async function detectAI(file) {
         }
         throw error;
     }
-}
-
-async function queryHuggingFaceDirectly(buffer) {
-    const API_URL = 'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector';
-    const response = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${state.hfToken}`,
-            "Content-Type": "application/octet-stream"
-        },
-        body: buffer
-    });
-
-    if (response.status === 503) {
-        throw new Error('Model is loading on Hugging Face. Please wait 20 seconds and try again.');
-    }
-
-    if (response.status === 401 || response.status === 403) {
-        throw new Error('Invalid Hugging Face token. Please update it in Settings.');
-    }
-
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Hugging Face API error (${response.status}): ${text}`);
-    }
-
-    return await response.json();
 }
 
 async function extractMetadata(file) {

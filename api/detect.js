@@ -7,7 +7,7 @@ export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-hf-token');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -25,12 +25,12 @@ export default async function handler(req, res) {
     }
     const buffer = Buffer.concat(chunks);
 
-    // Get token from header or env var
-    const hfToken = req.headers['x-hf-token'] || process.env.HF_TOKEN || '';
+    // Get token exclusively from server-side environment variable (never exposed to users)
+    const hfToken = process.env.HF_TOKEN || '';
 
     if (!hfToken) {
-      return res.status(401).json({
-        error: 'No Hugging Face token configured. Open Settings (⚙️) and enter your HF token.',
+      return res.status(500).json({
+        error: 'Server configuration error: HF_TOKEN environment variable is not set.',
       });
     }
 
@@ -78,8 +78,8 @@ export default async function handler(req, res) {
     const bodyText = await hfRes.text();
 
     if (hfRes.status === 401 || hfRes.status === 403) {
-      return res.status(401).json({
-        error: 'Invalid or expired Hugging Face token. Please update it in Settings (⚙️).',
+      return res.status(500).json({
+        error: 'Server configuration error: Hugging Face token is invalid or expired.',
       });
     }
 
