@@ -1,49 +1,64 @@
-// Standard Node.js runtime
+import https from 'https';
+
 export const config = {
   maxDuration: 30,
 };
 
-// Query a single Hugging Face model
-async function queryModel(modelId, token, buffer) {
-  const url = `https://api-inference.huggingface.co/models/${modelId}`;
-  
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000);
-
-  try {
-    const response = await fetch(url, {
+// Query a single Hugging Face model using Node's native https module
+function queryModel(modelId, token, buffer) {
+  return new Promise((resolve) => {
+    const postData = buffer;
+    const options = {
+      hostname: 'api-inference.huggingface.co',
+      port: 443,
+      path: `/models/${modelId}`,
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/octet-stream',
+        'Content-Length': postData.length,
       },
-      body: buffer,
-      signal: controller.signal,
+      timeout: 20000,
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode === 503) {
+          let est = 20;
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed.estimated_time) est = Math.ceil(parsed.estimated_time);
+          } catch (_) {}
+          resolve({ status: 503, wait: est });
+        } else if (res.statusCode !== 200) {
+          resolve({ status: res.statusCode, error: body || 'Request failed' });
+        } else {
+          try {
+            const data = JSON.parse(body);
+            resolve({ status: 200, data });
+          } catch (e) {
+            resolve({ status: 500, error: 'Invalid JSON response' });
+          }
+        }
+      });
     });
 
-    clearTimeout(timeoutId);
+    req.on('error', (err) => {
+      resolve({ status: 500, error: err.message || String(err) });
+    });
 
-    if (response.status === 503) {
-      const text = await response.text();
-      let est = 20;
-      try {
-        const parsed = JSON.parse(text);
-        if (parsed.estimated_time) est = Math.ceil(parsed.estimated_time);
-      } catch (_) {}
-      return { status: 503, wait: est };
-    }
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ status: 504, error: 'Request Timeout' });
+    });
 
-    if (!response.ok) {
-      return { status: response.status, error: await response.text().catch(() => 'Unknown error') };
-    }
-
-    const data = await response.json();
-    return { status: 200, data };
-
-  } catch (err) {
-    clearTimeout(timeoutId);
-    return { status: 500, error: err.message || String(err) };
-  }
+    req.write(postData);
+    req.end();
+  });
 }
 
 export default async function handler(req, res) {
@@ -117,7 +132,6 @@ export default async function handler(req, res) {
     // Extract score from Model 2 (SDXL ResNet Detector)
     let m2ArtificialScore = 0.5;
     if (model2Data && Array.isArray(model2Data)) {
-      // SDXL detector uses labels like "artificial" or "fake" and "human" or "real" or "sdxl"
       const fakeLabel = model2Data.find(item => 
         item.label.toLowerCase().includes('artificial') || 
         item.label.toLowerCase().includes('fake') || 
@@ -138,7 +152,6 @@ export default async function handler(req, res) {
     // Calculate ensemble (average) score
     let finalArtificialScore = 0.5;
     if (model1Data && model2Data) {
-      // Average both inputs for robust analysis
       finalArtificialScore = (m1ArtificialScore + m2ArtificialScore) / 2;
     } else {
       finalArtificialScore = model1Data ? m1ArtificialScore : m2ArtificialScore;
