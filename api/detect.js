@@ -147,7 +147,11 @@ export default async function handler(req, res) {
           const geminiJson = await geminiRes.json();
           const textResponse = geminiJson.candidates?.[0]?.content?.parts?.[0]?.text;
           if (textResponse) {
-            geminiData = JSON.parse(textResponse);
+            let cleanedText = textResponse.trim();
+            if (cleanedText.startsWith('```')) {
+              cleanedText = cleanedText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+            }
+            geminiData = JSON.parse(cleanedText);
           }
         } else {
           console.error('[detect] Gemini API error status:', geminiRes.status, await geminiRes.text().catch(() => ''));
