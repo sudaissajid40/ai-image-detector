@@ -34,32 +34,46 @@ export default async function handler(req, res) {
       });
     }
 
-    // Try the model with a 25-second timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    // Try multiple API URLs for resilience (both standard and modern Hugging Face routers)
+    const API_URLS = [
+      'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector',
+      'https://router.huggingface.co/hf-inference/models/umm-maybe/AI-image-detector'
+    ];
 
-    let hfRes;
-    try {
-      hfRes = await fetch(
-        'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector',
-        {
+    let lastError = null;
+    let hfRes = null;
+
+    for (const apiEntry of API_URLS) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+      try {
+        hfRes = await fetch(apiEntry, {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${hfToken}`,
+            'Authorization': `Bearer ${hfToken.trim()}`,
             'Content-Type': 'application/octet-stream',
           },
           body: buffer,
           signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+        if (hfRes.ok || hfRes.status === 503 || hfRes.status === 401 || hfRes.status === 403) {
+          break; // Stop trying URLs if we got a definitive model or auth response
         }
-      );
-    } catch (fetchErr) {
-      clearTimeout(timeoutId);
-      return res.status(502).json({
-        error: `Could not reach Hugging Face API: ${fetchErr.message}`,
-      });
+        lastError = `Status ${hfRes.status}: ${await hfRes.text().catch(() => '')}`;
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        lastError = fetchErr.message || String(fetchErr);
+      }
     }
 
-    clearTimeout(timeoutId);
+    if (!hfRes) {
+      return res.status(502).json({
+        error: `Could not reach Hugging Face API. Last connection error: ${lastError}`,
+      });
+    }
 
     const bodyText = await hfRes.text();
 
