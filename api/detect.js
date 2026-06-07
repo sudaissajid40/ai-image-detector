@@ -1,34 +1,57 @@
 import https from 'https';
+import dns from 'dns';
 
 export const config = {
   maxDuration: 30,
 };
 
-// Query Hugging Face using standard Node HTTPS with backup hosts
-function queryModel(modelId, token, buffer) {
+// Use Cloudflare DNS (1.1.1.1) to bypass Vercel's broken DNS resolver
+const resolver = new dns.Resolver();
+resolver.setServers(['1.1.1.1:53', '8.8.8.8:53']);
+
+function resolveHostname(hostname) {
+  return new Promise((resolve, reject) => {
+    resolver.resolve4(hostname, (err, addresses) => {
+      if (err) {
+        // Fallback: try system resolver
+        dns.resolve4(hostname, (err2, addrs) => {
+          if (err2) reject(new Error(`DNS failed: ${err.message} / ${err2.message}`));
+          else resolve(addrs[0]);
+        });
+      } else {
+        resolve(addresses[0]);
+      }
+    });
+  });
+}
+
+// Query a single Hugging Face model using resolved IP
+async function queryModel(modelId, token, buffer) {
+  let ip;
+  try {
+    ip = await resolveHostname('api-inference.huggingface.co');
+  } catch (dnsErr) {
+    return { status: 500, error: `DNS resolution failed: ${dnsErr.message}` };
+  }
+
   return new Promise((resolve) => {
-    const postData = buffer;
-    
-    // We try api-inference.huggingface.co. If that fails, we can resolve to static Hugging Face cloudfront domains.
     const options = {
-      hostname: 'api-inference.huggingface.co',
+      hostname: ip,
       port: 443,
       path: `/models/${modelId}`,
       method: 'POST',
       headers: {
+        'Host': 'api-inference.huggingface.co',
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/octet-stream',
-        'Content-Length': postData.length,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Content-Length': buffer.length,
       },
       timeout: 25000,
     };
 
     const req = https.request(options, (res) => {
       let body = '';
-      res.on('data', (chunk) => {
-        body += chunk;
-      });
+      res.on('data', (chunk) => { body += chunk; });
       res.on('end', () => {
         if (res.statusCode === 503) {
           let est = 20;
@@ -37,138 +60,90 @@ function queryModel(modelId, token, buffer) {
             if (parsed.estimated_time) est = Math.ceil(parsed.estimated_time);
           } catch (_) {}
           resolve({ status: 503, wait: est });
+        } else if (res.statusCode === 401 || res.statusCode === 403) {
+          resolve({ status: res.statusCode, error: 'Invalid or expired Hugging Face token.' });
         } else if (res.statusCode !== 200) {
-          resolve({ status: res.statusCode, error: body || 'Request failed' });
+          resolve({ status: res.statusCode, error: body.slice(0, 200) });
         } else {
           try {
-            const data = JSON.parse(body);
-            resolve({ status: 200, data });
-          } catch (e) {
-            resolve({ status: 500, error: 'Invalid JSON response' });
+            resolve({ status: 200, data: JSON.parse(body) });
+          } catch (_) {
+            resolve({ status: 500, error: 'Invalid JSON from model' });
           }
         }
       });
     });
 
-    req.on('error', (err) => {
-      resolve({ status: 500, error: `Connection failed: ${err.message || String(err)}` });
-    });
-
-    req.on('timeout', () => {
-      req.destroy();
-      resolve({ status: 504, error: 'Request Timeout' });
-    });
-
-    req.write(postData);
+    req.on('error', (err) => resolve({ status: 500, error: err.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 504, error: 'Timeout' }); });
+    req.write(buffer);
     req.end();
   });
 }
 
 export default async function handler(req, res) {
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-hf-token');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // Read raw body
     const chunks = [];
-    for await (const chunk of req) {
-      chunks.push(chunk);
-    }
+    for await (const chunk of req) chunks.push(chunk);
     const buffer = Buffer.concat(chunks);
 
-    // Get token
-    const hfToken = req.headers['x-hf-token'] || process.env.HF_TOKEN || '';
+    const hfToken = (req.headers['x-hf-token'] || process.env.HF_TOKEN || '').trim();
     if (!hfToken) {
       return res.status(401).json({
         error: 'No Hugging Face token configured. Open Settings (⚙️) and enter your HF token.',
       });
     }
 
-    const tokenClean = hfToken.trim();
-
     // Query both models in parallel
-    const [model1Result, model2Result] = await Promise.all([
-      queryModel('umm-maybe/AI-image-detector', tokenClean, buffer),
-      queryModel('Organika/sdxl-detector', tokenClean, buffer)
+    const [m1, m2] = await Promise.all([
+      queryModel('umm-maybe/AI-image-detector', hfToken, buffer),
+      queryModel('Organika/sdxl-detector', hfToken, buffer),
     ]);
 
-    // Handle initial loading states
-    if (model1Result.status === 503 || model2Result.status === 503) {
-      const wait = Math.max(model1Result.wait || 0, model2Result.wait || 0);
-      return res.status(503).json({
-        error: `AI models are currently starting up on Hugging Face. Please try again in ${wait} seconds.`
-      });
+    if (m1.status === 503 || m2.status === 503) {
+      const wait = Math.max(m1.wait || 0, m2.wait || 0);
+      return res.status(503).json({ error: `Models loading. Wait ${wait}s and try again.` });
     }
 
-    let model1Data = model1Result.status === 200 ? model1Result.data : null;
-    let model2Data = model2Result.status === 200 ? model2Result.data : null;
+    const d1 = m1.status === 200 ? m1.data : null;
+    const d2 = m2.status === 200 ? m2.data : null;
 
-    if (!model1Data && !model2Data) {
+    if (!d1 && !d2) {
       return res.status(502).json({
-        error: `AI Inference failed. Details: Model 1 (${model1Result.status}): ${model1Result.error || 'OK'}, Model 2 (${model2Result.status}): ${model2Result.error || 'OK'}`
+        error: `AI Inference failed. M1(${m1.status}): ${m1.error || 'err'} | M2(${m2.status}): ${m2.error || 'err'}`,
       });
     }
 
-    // Extract score from Model 1 (ViT Detector)
-    let m1ArtificialScore = 0.5;
-    if (model1Data && Array.isArray(model1Data)) {
-      const artificialLabel = model1Data.find(item => item.label.toLowerCase().includes('artificial') || item.label.toLowerCase().includes('fake'));
-      if (artificialLabel) {
-        m1ArtificialScore = artificialLabel.score;
-      } else {
-        const humanLabel = model1Data.find(item => item.label.toLowerCase().includes('human') || item.label.toLowerCase().includes('real'));
-        if (humanLabel) m1ArtificialScore = 1 - humanLabel.score;
-      }
-    }
-
-    // Extract score from Model 2 (SDXL ResNet Detector)
-    let m2ArtificialScore = 0.5;
-    if (model2Data && Array.isArray(model2Data)) {
-      const fakeLabel = model2Data.find(item => 
-        item.label.toLowerCase().includes('artificial') || 
-        item.label.toLowerCase().includes('fake') || 
-        item.label.toLowerCase().includes('sdxl') ||
-        item.label.toLowerCase().includes('generated')
+    const extractAI = (data, isSDXL = false) => {
+      if (!data || !Array.isArray(data)) return 0.5;
+      const fake = data.find(i =>
+        i.label.toLowerCase().includes('artificial') ||
+        i.label.toLowerCase().includes('fake') ||
+        (isSDXL && (i.label.toLowerCase().includes('sdxl') || i.label.toLowerCase().includes('generated')))
       );
-      if (fakeLabel) {
-        m2ArtificialScore = fakeLabel.score;
-      } else {
-        const realLabel = model2Data.find(item => 
-          item.label.toLowerCase().includes('human') || 
-          item.label.toLowerCase().includes('real')
-        );
-        if (realLabel) m2ArtificialScore = 1 - realLabel.score;
-      }
-    }
+      if (fake) return fake.score;
+      const real = data.find(i => i.label.toLowerCase().includes('human') || i.label.toLowerCase().includes('real'));
+      return real ? 1 - real.score : 0.5;
+    };
 
-    // Calculate ensemble (average) score
-    let finalArtificialScore = 0.5;
-    if (model1Data && model2Data) {
-      finalArtificialScore = (m1ArtificialScore + m2ArtificialScore) / 2;
-    } else {
-      finalArtificialScore = model1Data ? m1ArtificialScore : m2ArtificialScore;
-    }
+    const s1 = extractAI(d1, false);
+    const s2 = extractAI(d2, true);
+    const final = (d1 && d2) ? (s1 + s2) / 2 : (d1 ? s1 : s2);
 
-    // Package response to match original frontend schema
-    const responsePayload = [
-      { label: 'artificial', score: finalArtificialScore },
-      { label: 'human', score: 1 - finalArtificialScore }
-    ];
-
-    return res.status(200).json(responsePayload);
+    return res.status(200).json([
+      { label: 'artificial', score: final },
+      { label: 'human', score: 1 - final },
+    ]);
 
   } catch (err) {
-    console.error('[detect] Unhandled error:', err);
+    console.error('[detect]', err);
     return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 }
