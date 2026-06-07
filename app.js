@@ -219,53 +219,12 @@ async function compressImage(file) {
 async function detectAI(file) {
     const buffer = await compressImage(file);
     
-    // On local/file protocol: call HF API directly from browser
-    const isLocalStatic = window.location.hostname === 'localhost' || 
-                          window.location.hostname === '127.0.0.1' || 
-                          window.location.protocol === 'file:';
-                          
-    if (isLocalStatic) {
-        if (!state.hfToken) {
-            throw new Error('No token set. Please open Settings (gear icon) and enter your Hugging Face token.');
-        }
-        return await queryHuggingFaceDirectly(buffer);
+    // Call the Hugging Face API directly from the browser to bypass Vercel server DNS failures.
+    if (!state.hfToken) {
+        throw new Error('No Hugging Face API token configured. Please open Settings (⚙️) and enter your token.');
     }
-
-    // On Vercel: use server-side API (token from env var, supplemented by x-hf-token header)
-    const API_URL = "/api/detect";
     
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-    
-    try {
-        const response = await fetch(API_URL, {
-            method: "POST",
-            headers: {
-                "x-hf-token": state.hfToken || '',
-                "Content-Type": "application/octet-stream"
-            },
-            body: buffer,
-            signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-
-        const data = await response.json().catch(() => ({ error: `Server error ${response.status}` }));
-
-        if (!response.ok) {
-            throw new Error(data.error || `Server returned ${response.status}`);
-        }
-
-        return data;
-
-    } catch (error) {
-        clearTimeout(timeoutId);
-        
-        if (error.name === 'AbortError') {
-            throw new Error('Request timed out. The AI model may still be loading. Please try again in 20 seconds.');
-        }
-        throw error;
-    }
+    return await queryHuggingFaceDirectly(buffer);
 }
 
 async function queryHuggingFaceDirectly(buffer) {
