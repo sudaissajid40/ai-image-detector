@@ -12,9 +12,8 @@ const supabaseKey = window.SUPABASE_ANON_KEY || SUPABASE_ANON_KEY;
 let supabaseClient = null;
 try {
     if (typeof supabase !== 'undefined') {
-        // If we are locally testing or have keys set
-        const url = localStorage.getItem('sb_url') || supabaseUrl;
-        const key = localStorage.getItem('sb_key') || supabaseKey;
+        const url = supabaseUrl;
+        const key = supabaseKey;
         if (url && key && url !== 'https://your-supabase-project.supabase.co') {
             supabaseClient = supabase.createClient(url, key);
         }
@@ -84,10 +83,7 @@ const adminUserList = document.getElementById('adminUserList');
 async function init() {
     setupEventListeners();
     
-    // Check if configuration needs to be entered (local testing helper)
-    if (!supabaseClient) {
-        promptForSupabaseConfig();
-    } else {
+    if (supabaseClient) {
         // Monitor session auth state
         supabaseClient.auth.onAuthStateChange(async (event, session) => {
             state.session = session;
@@ -108,49 +104,8 @@ async function init() {
         } else {
             updateAuthUI();
         }
-    }
-}
-
-function promptForSupabaseConfig() {
-    // If Supabase client could not initialize (e.g. placeholder keys), check localStorage
-    const savedUrl = localStorage.getItem('sb_url');
-    const savedKey = localStorage.getItem('sb_key');
-    if (!savedUrl || !savedKey) {
-        // Create an alert overlay to prompt user to input their Supabase credentials
-        const configDiv = document.createElement('div');
-        configDiv.style = "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(15, 23, 42, 0.95); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px;";
-        configDiv.innerHTML = `
-            <div class="card" style="max-width: 500px; width: 100%; padding: 2rem; background: var(--bg-card); border: 1px solid var(--primary);">
-                <h3 style="color: var(--primary); margin-bottom: 1rem;">Configure Database & Auth</h3>
-                <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">Please configure your Supabase Credentials. These will be stored locally in your browser for testing.</p>
-                <div class="form-group" style="margin-bottom: 1rem;">
-                    <label>Supabase URL</label>
-                    <input type="text" id="sbUrlInput" placeholder="https://yourproject.supabase.co" style="width:100%; padding:0.75rem; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:white;">
-                </div>
-                <div class="form-group" style="margin-bottom: 1.5rem;">
-                    <label>Supabase Anon Key</label>
-                    <input type="password" id="sbKeyInput" placeholder="eyJhbG..." style="width:100%; padding:0.75rem; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:white;">
-                </div>
-                <button id="saveSbConfigBtn" class="btn primary" style="width: 100%;">Save & Initialize</button>
-            </div>
-        `;
-        document.body.appendChild(configDiv);
-        document.getElementById('saveSbConfigBtn').addEventListener('click', () => {
-            const url = document.getElementById('sbUrlInput').value.trim();
-            const key = document.getElementById('sbKeyInput').value.trim();
-            if (url && key) {
-                localStorage.setItem('sb_url', url);
-                localStorage.setItem('sb_key', key);
-                window.location.reload();
-            } else {
-                alert('Please enter both parameters.');
-            }
-        });
     } else {
-        if (typeof supabase !== 'undefined') {
-            supabaseClient = supabase.createClient(savedUrl, savedKey);
-            init(); // Retry initialization with loaded credentials
-        }
+        console.error("Supabase client is not initialized. Please verify SUPABASE_URL and SUPABASE_ANON_KEY.");
     }
 }
 
