@@ -1,140 +1,116 @@
-// Edge Runtime runs on Cloudflare's global network — can reach api-inference.huggingface.co
+// Standard Node.js runtime (more compatible than Edge for external API calls)
 export const config = {
-  runtime: 'edge',
+  maxDuration: 30,
 };
 
-async function queryModel(modelId, token, buffer) {
-  try {
-    const response = await fetch(
-      `https://api-inference.huggingface.co/models/${modelId}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: buffer,
-        signal: AbortSignal.timeout(25000),
-      }
-    );
-
-    if (response.status === 503) {
-      let est = 20;
-      try {
-        const body = await response.json();
-        if (body.estimated_time) est = Math.ceil(body.estimated_time);
-      } catch (_) {}
-      return { status: 503, wait: est };
-    }
-
-    if (response.status === 401 || response.status === 403) {
-      return { status: response.status, error: 'Invalid or expired Hugging Face token. Update it in Settings (⚙️).' };
-    }
-
-    if (!response.ok) {
-      const text = await response.text();
-      return { status: response.status, error: text.slice(0, 200) };
-    }
-
-    const data = await response.json();
-    return { status: 200, data };
-
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      return { status: 504, error: 'Request timed out' };
-    }
-    return { status: 500, error: err.message || String(err) };
-  }
-}
-
-function extractAIScore(data, isSDXL = false) {
-  if (!data || !Array.isArray(data)) return 0.5;
-  const fake = data.find(i =>
-    i.label.toLowerCase().includes('artificial') ||
-    i.label.toLowerCase().includes('fake') ||
-    (isSDXL && (i.label.toLowerCase().includes('sdxl') || i.label.toLowerCase().includes('generated')))
-  );
-  if (fake) return fake.score;
-  const real = data.find(i => i.label.toLowerCase().includes('human') || i.label.toLowerCase().includes('real'));
-  return real ? 1 - real.score : 0.5;
-}
-
-export default async function handler(req) {
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-hf-token',
-    'Content-Type': 'application/json',
-  };
+export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-hf-token');
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 200, headers: corsHeaders });
+    return res.status(200).end();
   }
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const buffer = await req.arrayBuffer();
-    const hfToken = (req.headers.get('x-hf-token') || process.env.HF_TOKEN || '').trim();
+    // Read raw body
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+
+    // Get token from header or env var
+    const hfToken = req.headers['x-hf-token'] || process.env.HF_TOKEN || '';
 
     if (!hfToken) {
-      return new Response(
-        JSON.stringify({ error: 'No Hugging Face token. Open Settings (⚙️) and enter your HF token.' }),
-        { status: 401, headers: corsHeaders }
-      );
+      return res.status(401).json({
+        error: 'No Hugging Face token configured. Open Settings (⚙️) and enter your HF token.',
+      });
     }
 
-    // Query both models in parallel using Edge fetch (Cloudflare network)
-    const [m1, m2] = await Promise.all([
-      queryModel('umm-maybe/AI-image-detector', hfToken, buffer),
-      queryModel('Organika/sdxl-detector', hfToken, buffer),
-    ]);
+    // Try multiple API URLs for resilience (both standard and modern Hugging Face routers)
+    const API_URLS = [
+      'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector',
+      'https://router.huggingface.co/hf-inference/models/umm-maybe/AI-image-detector'
+    ];
 
-    if (m1.status === 503 || m2.status === 503) {
-      const wait = Math.max(m1.wait || 0, m2.wait || 0);
-      return new Response(
-        JSON.stringify({ error: `Models loading. Wait ${wait}s and retry.` }),
-        { status: 503, headers: corsHeaders }
-      );
+    let lastError = null;
+    let hfRes = null;
+
+    for (const apiEntry of API_URLS) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+      try {
+        hfRes = await fetch(apiEntry, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${hfToken.trim()}`,
+            'Content-Type': 'application/octet-stream',
+          },
+          body: buffer,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+        if (hfRes.ok || hfRes.status === 503 || hfRes.status === 401 || hfRes.status === 403) {
+          break; // Stop trying URLs if we got a definitive model or auth response
+        }
+        lastError = `Status ${hfRes.status}: ${await hfRes.text().catch(() => '')}`;
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        lastError = fetchErr.message || String(fetchErr);
+      }
     }
 
-    if (m1.status === 401 || m2.status === 401) {
-      return new Response(
-        JSON.stringify({ error: 'Invalid or expired Hugging Face token. Update in Settings (⚙️).' }),
-        { status: 401, headers: corsHeaders }
-      );
+    if (!hfRes) {
+      return res.status(502).json({
+        error: `Could not reach Hugging Face API. Last connection error: ${lastError}`,
+      });
     }
 
-    const d1 = m1.status === 200 ? m1.data : null;
-    const d2 = m2.status === 200 ? m2.data : null;
+    const bodyText = await hfRes.text();
 
-    if (!d1 && !d2) {
-      return new Response(
-        JSON.stringify({
-          error: `Inference failed. M1(${m1.status}): ${m1.error || '?'} | M2(${m2.status}): ${m2.error || '?'}`,
-        }),
-        { status: 502, headers: corsHeaders }
-      );
+    if (hfRes.status === 401 || hfRes.status === 403) {
+      return res.status(401).json({
+        error: 'Invalid or expired Hugging Face token. Please update it in Settings (⚙️).',
+      });
     }
 
-    const s1 = extractAIScore(d1, false);
-    const s2 = extractAIScore(d2, true);
-    const final = (d1 && d2) ? (s1 + s2) / 2 : (d1 ? s1 : s2);
+    if (hfRes.status === 503) {
+      let waitSecs = 20;
+      try {
+        const parsed = JSON.parse(bodyText);
+        if (parsed.estimated_time) waitSecs = Math.ceil(parsed.estimated_time);
+      } catch (_) {}
+      return res.status(503).json({
+        error: `Model is loading. Please wait ${waitSecs} seconds and try again.`,
+      });
+    }
 
-    return new Response(
-      JSON.stringify([
-        { label: 'artificial', score: final },
-        { label: 'human', score: 1 - final },
-      ]),
-      { status: 200, headers: corsHeaders }
-    );
+    if (!hfRes.ok) {
+      return res.status(502).json({
+        error: `Hugging Face returned ${hfRes.status}: ${bodyText.slice(0, 200)}`,
+      });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(bodyText);
+    } catch (_) {
+      return res.status(502).json({ error: `Invalid JSON from Hugging Face: ${bodyText.slice(0, 200)}` });
+    }
+
+    return res.status(200).json(data);
 
   } catch (err) {
-    return new Response(
-      JSON.stringify({ error: err.message || 'Internal server error' }),
-      { status: 500, headers: corsHeaders }
-    );
+    console.error('[detect] Unhandled error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 }
