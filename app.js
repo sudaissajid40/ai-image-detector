@@ -261,12 +261,7 @@ async function detectAI(file) {
         if (error.name === 'AbortError') {
             throw new Error('Request timed out. The AI model may still be loading. Please try again in 20 seconds.');
         }
-        // Fallback: If Vercel has DNS issues but user is not on a blocked network, try direct browser call
-        if (state.hfToken) {
-            console.warn("Vercel proxy failed, falling back to direct browser query...", error);
-            return await queryHuggingFaceDirectly(buffer);
-        }
-        throw error;
+        throw new Error(`Server Proxy failed: ${error.message || String(error)}`);
     }
 }
 
