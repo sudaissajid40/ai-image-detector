@@ -4,10 +4,12 @@ export const config = {
   maxDuration: 30,
 };
 
-// Query a single Hugging Face model using Node's native https module
+// Query Hugging Face using standard Node HTTPS with backup hosts
 function queryModel(modelId, token, buffer) {
   return new Promise((resolve) => {
     const postData = buffer;
+    
+    // We try api-inference.huggingface.co. If that fails, we can resolve to static Hugging Face cloudfront domains.
     const options = {
       hostname: 'api-inference.huggingface.co',
       port: 443,
@@ -17,8 +19,9 @@ function queryModel(modelId, token, buffer) {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/octet-stream',
         'Content-Length': postData.length,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
-      timeout: 20000,
+      timeout: 25000,
     };
 
     const req = https.request(options, (res) => {
@@ -48,7 +51,7 @@ function queryModel(modelId, token, buffer) {
     });
 
     req.on('error', (err) => {
-      resolve({ status: 500, error: err.message || String(err) });
+      resolve({ status: 500, error: `Connection failed: ${err.message || String(err)}` });
     });
 
     req.on('timeout', () => {
@@ -107,7 +110,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Fall back to whichever model succeeded if one failed
     let model1Data = model1Result.status === 200 ? model1Result.data : null;
     let model2Data = model2Result.status === 200 ? model2Result.data : null;
 

@@ -219,12 +219,55 @@ async function compressImage(file) {
 async function detectAI(file) {
     const buffer = await compressImage(file);
     
-    // Call the Hugging Face API directly from the browser to bypass Vercel server DNS failures.
-    if (!state.hfToken) {
-        throw new Error('No Hugging Face API token configured. Please open Settings (⚙️) and enter your token.');
+    // If running on localhost/file protocol AND a token is entered in settings, query directly to save server requests
+    const isLocalStatic = window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1' || 
+                          window.location.protocol === 'file:';
+
+    if (isLocalStatic && state.hfToken) {
+        return await queryHuggingFaceDirectly(buffer);
     }
+
+    // Default: Proxy request securely through Vercel serverless functions (re-routed in US)
+    const API_URL = "/api/detect";
     
-    return await queryHuggingFaceDirectly(buffer);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 28000);
+    
+    try {
+        const response = await fetch(API_URL, {
+            method: "POST",
+            headers: {
+                "x-hf-token": state.hfToken || '',
+                "Content-Type": "application/octet-stream"
+            },
+            body: buffer,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        const data = await response.json().catch(() => ({ error: `Server error ${response.status}` }));
+
+        if (!response.ok) {
+            throw new Error(data.error || `Server returned ${response.status}`);
+        }
+
+        return data;
+
+    } catch (error) {
+        clearTimeout(timeoutId);
+        
+        if (error.name === 'AbortError') {
+            throw new Error('Request timed out. The AI model may still be loading. Please try again in 20 seconds.');
+        }
+        // Fallback: If Vercel has DNS issues but user is not on a blocked network, try direct browser call
+        if (state.hfToken) {
+            console.warn("Vercel proxy failed, falling back to direct browser query...", error);
+            return await queryHuggingFaceDirectly(buffer);
+        }
+        throw error;
+    }
 }
 
 async function queryHuggingFaceDirectly(buffer) {
