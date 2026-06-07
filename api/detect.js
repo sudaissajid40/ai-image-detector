@@ -110,6 +110,7 @@ export default async function handler(req, res) {
     // Call Gemini API if key is configured
     const geminiApiKey = process.env.GEMINI_API_KEY;
     let geminiData = null;
+    let geminiError = null;
 
     if (geminiApiKey) {
       try {
@@ -152,11 +153,15 @@ export default async function handler(req, res) {
               cleanedText = cleanedText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
             }
             geminiData = JSON.parse(cleanedText);
+          } else {
+            geminiError = 'No text response from Gemini';
           }
         } else {
-          console.error('[detect] Gemini API error status:', geminiRes.status, await geminiRes.text().catch(() => ''));
+          geminiError = `Gemini status ${geminiRes.status}: ${await geminiRes.text().catch(() => '')}`;
+          console.error('[detect] Gemini API error status:', geminiRes.status, geminiError);
         }
       } catch (geminiErr) {
+        geminiError = geminiErr.message || String(geminiErr);
         console.error('[detect] Gemini integration error:', geminiErr);
       }
     }
@@ -189,7 +194,9 @@ export default async function handler(req, res) {
       hfScore: Math.round(hfScore),
       geminiResults: geminiData,
       combinedScore: combinedScore,
-      geminiActive: !!geminiData
+      geminiActive: !!geminiData,
+      geminiKeyPresent: !!geminiApiKey,
+      geminiError: geminiError
     });
 
   } catch (err) {
