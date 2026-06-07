@@ -115,7 +115,7 @@ export default async function handler(req, res) {
     if (geminiApiKey) {
       try {
         const base64Image = buffer.toString('base64');
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`;
         
         const geminiRes = await fetch(geminiUrl, {
           method: 'POST',
