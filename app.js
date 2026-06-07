@@ -196,10 +196,22 @@ async function compressImage(file) {
 
 // API Integration
 async function detectAI(file) {
-    const API_URL = "/api/detect";
-    
     // We compress the image to ensure it's < 1MB so Vercel doesn't block it!
     const buffer = await compressImage(file);
+    
+    // Fallback: If we are running on a local static server or file protocol,
+    // and the user has configured their Hugging Face token in the settings modal,
+    // we call the Hugging Face API directly from the browser.
+    const isLocalStatic = window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1' || 
+                          window.location.protocol === 'file:';
+                          
+    if (isLocalStatic && state.hfToken) {
+        console.log("Local environment detected. Querying Hugging Face API directly from the client.");
+        return await queryHuggingFaceDirectly(buffer);
+    }
+
+    const API_URL = "/api/detect";
     
     // Set a 15-second timeout
     const controller = new AbortController();
@@ -219,11 +231,18 @@ async function detectAI(file) {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-            const err = await response.json();
-            if (response.status === 503) {
-                throw new Error('Model is currently loading on Hugging Face. Please try again in 10-20 seconds.');
+            let errorMsg = 'Failed to analyze image';
+            try {
+                const err = await response.json();
+                errorMsg = err.error || errorMsg;
+            } catch (e) {
+                errorMsg = `Server returned status ${response.status} (${response.statusText})`;
             }
-            throw new Error(err.error || 'Failed to analyze image');
+            
+            if (response.status === 503) {
+                throw new Error('Model is currently loading on Hugging Face. Please wait 10-20 seconds and try again.');
+            }
+            throw new Error(errorMsg);
         }
 
         return await response.json(); 
@@ -233,7 +252,7 @@ async function detectAI(file) {
         
         // If it's a network error or a timeout, fallback to a simulation so the UI doesn't break
         if (error.name === 'AbortError' || error.message === 'Failed to fetch' || error.name === 'TypeError') {
-            alert("Network Error or Timeout: Could not reach Hugging Face API (your network or DNS might be blocking it). Falling back to simulated results so you can see the UI!");
+            alert("Network Error or Timeout: Could not reach the API. Falling back to simulated results so you can see the UI!");
             // Return a simulated response
             return [
                 { label: "artificial", score: Math.random() * 0.8 + 0.1 }, 
@@ -242,6 +261,28 @@ async function detectAI(file) {
         }
         throw error;
     }
+}
+
+async function queryHuggingFaceDirectly(buffer) {
+    const API_URL = 'https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector';
+    const response = await fetch(API_URL, {
+        headers: {
+            "Authorization": `Bearer ${state.hfToken}`,
+            "Content-Type": "application/octet-stream"
+        },
+        method: "POST",
+        body: buffer
+    });
+
+    if (!response.ok) {
+        if (response.status === 503) {
+            throw new Error('Model is currently loading on Hugging Face. Please wait 10-20 seconds and try again.');
+        }
+        const text = await response.text();
+        throw new Error(`Hugging Face API Error (${response.status}): ${text}`);
+    }
+
+    return await response.json();
 }
 
 async function extractMetadata(file) {
