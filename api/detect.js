@@ -137,10 +137,7 @@ export default async function handler(req, res) {
                   }
                 ]
               }
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json'
-            }
+            ]
           })
         });
 
