@@ -188,8 +188,7 @@ function setupEventListeners() {
             state.authMode = 'login';
             authModalTitle.textContent = 'Sign In';
             authSubmitBtn.textContent = 'Sign In';
-            toggleAuthMode.textContent = 'Sign Up';
-            toggleAuthMode.parentNode.innerHTML = "Don't have an account? <span id="toggleAuthMode" style="color: var(--primary); cursor: pointer; text-decoration: underline;">Sign Up</span>";
+            toggleAuthMode.parentNode.innerHTML = 'Don\'t have an account? <span id="toggleAuthMode" style="color: var(--primary); cursor: pointer; text-decoration: underline;">Sign Up</span>';
             // re-bind
             document.getElementById('toggleAuthMode').addEventListener('click', () => toggleAuthMode.click());
         }
