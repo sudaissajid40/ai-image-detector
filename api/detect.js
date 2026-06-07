@@ -154,7 +154,20 @@ export default async function handler(req, res) {
             geminiError = 'No text response from Gemini';
           }
         } else {
-          geminiError = `Gemini status ${geminiRes.status}: ${await geminiRes.text().catch(() => '')}`;
+          let extraDebug = '';
+          try {
+            const listRes = await fetch(`https://generativelanguage.googleapis.com/v1/models?key=${geminiApiKey}`);
+            if (listRes.ok) {
+              const listJson = await listRes.json();
+              const modelNames = listJson.models?.map(m => m.name) || [];
+              extraDebug = ` | Available models: ${modelNames.join(', ')}`;
+            } else {
+              extraDebug = ` | ListModels failed: ${listRes.status}`;
+            }
+          } catch (listErr) {
+            extraDebug = ` | ListModels err: ${listErr.message}`;
+          }
+          geminiError = `Gemini status ${geminiRes.status}: ${await geminiRes.text().catch(() => '')}${extraDebug}`;
           console.error('[detect] Gemini API error status:', geminiRes.status, geminiError);
         }
       } catch (geminiErr) {
