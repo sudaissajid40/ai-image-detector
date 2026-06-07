@@ -117,7 +117,7 @@ async function runAnalysisPipeline(file, base64Data) {
         // 2. AI Inference
         updateProgress('Running AI Inference...', 'Querying Hugging Face Model', 50);
         const aiResults = await detectAI(file);
-        console.log('API Response:', aiResults);
+        console.log('API Response:', JSON.stringify(aiResults, null, 2));
         
         updateProgress('Finalizing Results...', 'Compiling health score', 90);
         
